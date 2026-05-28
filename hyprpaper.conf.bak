@@ -1,0 +1,33 @@
+# Preload your images
+# preload = /home/james/.config/hypr/wallpapers/flower3.jpg
+# preload = /home/james/.config/hypr/wallpapers/painting1.jpg
+# preload = /home/james/.config/hypr/wallpapers/flower2.jpeg
+#
+# preload = /home/james/.config/hypr/wallpapers/wallhaven_2jpg
+# preload = /home/james/.config/hypr/wallpapers/Giorgio_Morandi.jpg
+preload = /home/james/.config/hypr/wallpapers/Henri_Fantin_Latour.png
+
+# Monitor: eDP-1
+wallpaper {
+    monitor = desc:BOE 0x091B
+    path = /home/james/.config/hypr/wallpapers/Henri_Fantin_Latour.png
+    fit_mode = contain
+}
+
+# Monitor: DP-3
+wallpaper {
+    monitor = desc:HP Inc. HP 24fw 3CM0011DQD
+    path = /home/james/.config/hypr/wallpapers/Henri_Fantin_Latour.png
+    fit_mode = contain
+}
+
+# Monitor: DP-4
+wallpaper {
+    monitor = desc:HP Inc. HP M24f FHD 3CM1321BNL
+    path = /home/james/.config/hypr/wallpapers/wallhaven_2jpg
+    fit_mode = contain
+}
+
+# Global settings
+splash = false
+ipc = on
