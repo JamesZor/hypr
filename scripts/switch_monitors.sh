@@ -94,7 +94,7 @@ if [ "$1" = "--randomize" ]; then
 fi
 
 # Otherwise, run Rofi menu
-OPTIONS="Laptop\nHome\nOffice"
+OPTIONS="Laptop\nHome\nOffice\nPi_screen"
 SELECTED=$(echo -e "$OPTIONS" | rofi -dmenu -p "Select Monitor Layout" -i)
 
 if [ -z "$SELECTED" ]; then
