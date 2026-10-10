@@ -33,15 +33,37 @@ randomize_wallpapers() {
         return 1
     fi
 
+    # Monitor resolutions from the profile (e.g. "3440x1440"), keyed by monitor
+    declare -A monitor_res
+    while IFS=',' read -r name mode _; do
+        name=$(echo "$name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        monitor_res["$name"]=$(echo "$mode" | sed 's/^[[:space:]]*//;s/@.*//')
+    done < <(grep '^monitor[[:space:]]*=' "$profile_path" | grep -v 'disable' | cut -d'=' -f2-)
+
     # Randomly assign a wallpaper to each active monitor
     declare -A preloads
     declare -A monitor_wallpapers
+    declare -A monitor_fit
 
     for monitor in "${monitors[@]}"; do
         local rand_idx=$(( RANDOM % ${#images[@]} ))
         local selected_img="${images[$rand_idx]}"
         monitor_wallpapers["$monitor"]="$selected_img"
         preloads["$selected_img"]=1
+
+        # Images smaller than the monitor are letterboxed (contain) instead of
+        # stretched and cropped (fill)
+        monitor_fit["$monitor"]="fill"
+        local res="${monitor_res[$monitor]}"
+        local img_size
+        img_size=$(identify -format '%w %h' "${selected_img}[0]" 2>/dev/null)
+        if [[ "$res" =~ ^([0-9]+)x([0-9]+)$ && -n "$img_size" ]]; then
+            local mon_w=${BASH_REMATCH[1]} mon_h=${BASH_REMATCH[2]}
+            read -r img_w img_h <<< "$img_size"
+            if (( img_w < mon_w || img_h < mon_h )); then
+                monitor_fit["$monitor"]="contain"
+            fi
+        fi
     done
 
     # Remove symlink if exists to avoid overwriting profile templates
@@ -64,7 +86,7 @@ randomize_wallpapers() {
             echo "wallpaper {"
             echo "    monitor = $monitor"
             echo "    path = ${monitor_wallpapers[$monitor]}"
-            echo "    fit_mode = fill"
+            echo "    fit_mode = ${monitor_fit[$monitor]}"
             echo "}"
         done
         echo ""
