@@ -33,15 +33,99 @@ hl.bind(k(mainMod, "l"), hl.dsp.focus({ direction = "right" }))
 hl.bind(k(mainMod, "k"), hl.dsp.focus({ direction = "up" }))
 hl.bind(k(mainMod, "j"), hl.dsp.focus({ direction = "down" }))
 
--- Workspace switching/movement (absolute): <focused monitor id><NN>, 0 = slot 10
+-- Workspace switching/movement (absolute): slot N of the focused monitor's own bank, 0 = slot 10.
+-- The bank starts at the workspace of the first enabled `default = true` rule in the active profile
+-- whose monitor selector matches the monitor the way Hyprland does (CMonitor::matchesStaticSelector:
+-- "desc:X" = description starts with X, anything else = connector name). Monitor ids are not used.
+-- The profile is read once here, at config load, so the banks always match the workspace rules
+-- registered by lua/modules/workspaces.lua in the same load (a profile switch reloads the config).
+local bank_rules = nil -- profile `workspaces` list, nil when the profile could not be read
+do
+  local ok, rules = pcall(function()
+    local name = require("lua.state.active_profile")
+    if type(name) ~= "string" then return nil end
+    local profile = require("lua.profiles." .. name)
+    if type(profile) ~= "table" or type(profile.workspaces) ~= "table" then return nil end
+    local copy = {}
+    for _, w in ipairs(profile.workspaces) do
+      if type(w) == "table" then
+        copy[#copy + 1] = { workspace = w.workspace, monitor = w.monitor, default = w.default, enabled = w.enabled }
+      end
+    end
+    return copy
+  end)
+  if ok then bank_rules = rules end
+end
+
+local function trim(s)
+  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- A bank start is a positive whole number (a string of digits or an integer-valued number) below 10^18
+local function whole(v)
+  local n
+  if type(v) == "string" then
+    local s = trim(v)
+    if not s:match("^%d+$") then return nil end
+    s = s:gsub("^0+", "")
+    if s == "" or #s > 18 then return nil end
+    n = math.tointeger(tonumber(s))
+  elseif type(v) == "number" then
+    n = math.tointeger(v)
+    if n and n >= 1000000000000000000 then return nil end
+  end
+  if n and n >= 1 then return n end
+  return nil
+end
+
+local function selector_matches(sel, name, desc)
+  if type(sel) ~= "string" then return false end
+  if sel:sub(1, 5) == "desc:" then
+    local want = trim(sel:sub(6))
+    return type(desc) == "string" and desc:sub(1, #want) == want -- plain prefix, never a pattern
+  end
+  return type(name) == "string" and sel == name
+end
+
+-- Bank start of the focused monitor, or nil plus a short reason
+local function focused_bank()
+  local ok, mon = pcall(hl.get_active_monitor)
+  if not ok or mon == nil then return nil, "no focused monitor" end
+  -- Monitor objects are userdata: read fields by name only
+  local okf, name, desc = pcall(function() return mon.name, mon.description end)
+  if not okf then return nil, "monitor unreadable" end
+  if type(bank_rules) ~= "table" then return nil, "active profile not loaded" end
+  for _, w in ipairs(bank_rules) do
+    if w.default == true and w.enabled ~= false and selector_matches(w.monitor, name, desc) then
+      local start = whole(w.workspace)
+      if not start then return nil, "default workspace of " .. tostring(name) .. " is not a number" end
+      return start
+    end
+  end
+  return nil, "no workspace bank for " .. tostring(name)
+end
+
+local function notify(text)
+  pcall(hl.notification.create, { text = "hypr: " .. text, duration = 3000 })
+end
+
+local function number_key(slot, make)
+  return function()
+    local ok, start, why = pcall(focused_bank)
+    if not ok then start, why = nil, "workspace bank lookup failed" end
+    if not start then
+      notify(why or "no workspace bank")
+      return
+    end
+    local okd = pcall(function() hl.dispatch(make({ workspace = start + slot - 1 })) end)
+    if not okd then notify("workspace " .. (start + slot - 1) .. " dispatch failed") end
+  end
+end
+
 for key = 0, 9 do
   local slot = key == 0 and 10 or key
-  hl.bind("SUPER + " .. key, function()
-    hl.dispatch(hl.dsp.focus({ workspace = hl.get_active_monitor().id * 100 + slot }))
-  end)
-  hl.bind("SUPER + SHIFT + " .. key, function()
-    hl.dispatch(hl.dsp.window.move({ workspace = hl.get_active_monitor().id * 100 + slot }))
-  end)
+  hl.bind("SUPER + " .. key, number_key(slot, function(t) return hl.dsp.focus(t) end))
+  hl.bind("SUPER + SHIFT + " .. key, number_key(slot, function(t) return hl.dsp.window.move(t) end))
 end
 
 -- Swapping workspaces between monitors

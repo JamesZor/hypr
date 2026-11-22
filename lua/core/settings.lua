@@ -19,6 +19,7 @@ hl.config({
   scrolling = { column_width = 0.333, fullscreen_on_one_column = false, focus_fit_method = 0 },
   misc = { force_default_wallpaper = 0 },
   decoration = { rounding = 4, blur = { enabled = true, size = 3, passes = 1 } },
+  ecosystem = { no_update_news = true, no_donation_nag = true },
 })
 
 -- Empty per-device block from windows.conf

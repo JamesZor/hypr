@@ -118,22 +118,48 @@ randomize_wallpapers() {
     hyprpaper >/dev/null 2>&1 &
 }
 
-# Ensure each active monitor is on its bound workspace range (<id>01..<id>10)
-# and migrate any windows stranded on fallback workspaces (e.g. 11, 13)
+# Ensure each active monitor is on its own workspace bank (start..start+9, where start is the
+# workspace of the first enabled default rule whose monitor selector matches it, as Hyprland's
+# default-workspace lookup does) and migrate any windows stranded on fallback workspaces (e.g. 11, 13).
+# Monitors without a bank are left alone; without workspace rules nothing is touched.
 normalize_workspaces() {
-    local focused_mon
+    local focused_mon rules_json
     focused_mon=$(hyprctl monitors -j | jq -r '.[] | select(.focused==true).name // empty')
 
+    # Workspace rules in the 0.57.2 JSON shape (monitor/default only present when set)
+    rules_json=$(hyprctl workspacerules -j 2>/dev/null) || rules_json=""
+    if ! printf '%s' "$rules_json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # Bank start for a monitor (name, description), or nothing. Descriptions are EDID data: they
+    # only ever reach jq through --arg, never program text, eval text or unquoted shell.
+    bank_start() {
+        jq -rn --argjson rules "$rules_json" --arg name "$1" --arg desc "$2" '
+            [ $rules[]
+              | select(type == "object" and .default == true and .enabled != false and (.monitor | type) == "string")
+              | .monitor as $sel
+              | select(if ($sel | startswith("desc:"))
+                       then ($desc | startswith($sel[5:] | sub("^\\s+"; "") | sub("\\s+$"; "")))
+                       else $sel == $name end)
+            ] | .[0] // empty
+            | (.workspaceString | tostring | sub("^\\s+"; "") | sub("\\s+$"; "")) as $ws
+            | select($ws | test("^[0-9]{1,15}$"))
+            | ($ws | tonumber) | select(. >= 1) | tostring' 2>/dev/null
+    }
+
     while read -r mon_json; do
-        local mon_id mon_name active_ws active_addr min_ws max_ws default_ws ws_filter
-        mon_id=$(echo "$mon_json" | jq -r '.id')
-        mon_name=$(echo "$mon_json" | jq -r '.name')
+        local mon_name mon_desc active_ws active_addr min_ws max_ws default_ws ws_filter
+        mon_name=$(printf '%s\n' "$mon_json" | jq -r '.name')
+        mon_desc=$(printf '%s\n' "$mon_json" | jq -r '.description // ""')
         # Hyprland 0.57+ omits the id of named/special workspaces; 0.56 gives them a negative id
         active_ws=$(echo "$mon_json" | jq -r '.activeWorkspace.id // empty')
         active_addr=$(echo "$mon_json" | jq -r '.activeWorkspace.address // empty')
 
-        min_ws=$(( mon_id * 100 + 1 ))
-        max_ws=$(( mon_id * 100 + 10 ))
+        min_ws=$(bank_start "$mon_name" "$mon_desc")
+        # No bank for this monitor: leave it completely alone
+        [[ "$min_ws" =~ ^[0-9]+$ ]] || continue
+        max_ws=$(( min_ws + 9 ))
         default_ws=$min_ws
 
         # A workspace without a numeric id is out of bank, like a negative id was
