@@ -100,6 +100,36 @@ randomize_wallpapers() {
     hyprpaper >/dev/null 2>&1 &
 }
 
+# Ensure each active monitor is on its bound workspace range (<id>01..<id>10)
+# and migrate any windows stranded on fallback workspaces (e.g. 11, 13)
+normalize_workspaces() {
+    local focused_mon
+    focused_mon=$(hyprctl monitors -j | jq -r '.[] | select(.focused==true).name // empty')
+
+    while read -r mon_json; do
+        local mon_id mon_name active_ws min_ws max_ws default_ws
+        mon_id=$(echo "$mon_json" | jq -r '.id')
+        mon_name=$(echo "$mon_json" | jq -r '.name')
+        active_ws=$(echo "$mon_json" | jq -r '.activeWorkspace.id')
+
+        min_ws=$(( mon_id * 100 + 1 ))
+        max_ws=$(( mon_id * 100 + 10 ))
+        default_ws=$min_ws
+
+        if (( active_ws < min_ws || active_ws > max_ws )); then
+            # Move any windows from the unbound fallback workspace onto default_ws
+            while read -r addr; do
+                [ -n "$addr" ] && hyprctl dispatch movetoworkspacesilent "$default_ws,address:$addr" >/dev/null
+            done < <(hyprctl clients -j | jq -r ".[] | select(.workspace.id == $active_ws) | .address")
+
+            hyprctl dispatch focusmonitor "$mon_name" >/dev/null
+            hyprctl dispatch workspace "$default_ws" >/dev/null
+        fi
+    done < <(hyprctl monitors -j | jq -c '.[]')
+
+    [ -n "$focused_mon" ] && hyprctl dispatch focusmonitor "$focused_mon" >/dev/null
+}
+
 # --- Main Logic ---
 
 # Check if we just want to randomize the current profile (e.g. on boot)
@@ -116,7 +146,7 @@ if [ "$1" = "--randomize" ]; then
 fi
 
 # Otherwise, run Rofi menu
-OPTIONS="Laptop\nHome\nOffice\nPi_screen"
+OPTIONS="Laptop\nHome\nOffice\nMain\nPi_screen"
 SELECTED=$(echo -e "$OPTIONS" | rofi -dmenu -p "Select Monitor Layout" -i)
 
 if [ -z "$SELECTED" ]; then
@@ -132,6 +162,9 @@ if [ -f "$PROFILE_PATH" ]; then
     
     # Reload Hyprland
     hyprctl reload
+
+    # Ensure all monitors switch off fallback workspaces (e.g. 11, 13) onto their profile workspaces
+    normalize_workspaces
     
     # Randomize and set wallpapers for this layout
     randomize_wallpapers "$PROFILE_PATH"

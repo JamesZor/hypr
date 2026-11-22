@@ -1,26 +1,31 @@
 #!/bin/bash
 # Kill any existing overlay
-pkill -f "hypr-monitor-overlay"
+pkill -f "kitty --class hypr-monitor-overlay"
 
-# Safely get the most recently focused window that is NOT the overlay popup
-ADDR=$(hyprctl clients -j | jq -r 'map(select(.class != "hypr-monitor-overlay")) | sort_by(.focusHistoryID) | .[0].address')
+# Safely get the currently focused window (or most recently focused non-overlay window with focusHistoryID >= 0)
+ADDR=$(hyprctl activewindow -j | jq -r 'select(.class != "hypr-monitor-overlay") | .address // empty')
+if [ -z "$ADDR" ] || [ "$ADDR" = "null" ]; then
+    ADDR=$(hyprctl clients -j | jq -r 'map(select(.class != "hypr-monitor-overlay" and .focusHistoryID >= 0)) | sort_by(.focusHistoryID) | .[0].address // empty')
+fi
 if [ -n "$ADDR" ] && [ "$ADDR" != "null" ]; then
     echo "$ADDR" > /tmp/hypr_move_window.txt
 fi
 
-
-monitors=$(hyprctl monitors -j)
-counter=1
-
 # Dynamically map monitors based on x position to ensure 1 is left, 2 is middle, 3 is right
-# (Or just sort by ID, but sorting by x is better for physical layout)
-echo "$monitors" | jq -c 'sort_by(.x) | .[]' | while read -r monitor; do
-    id=$(echo "$monitor" | jq -r '.id')
-    name=$(echo "$monitor" | jq -r '.name')
-    
-    # Launch kitty as an overlay on each monitor
-    # It will display the number centered and close automatically if not killed
-    hyprctl dispatch exec "[float; nofocus; noanim; center; size 250 150; monitor $name] kitty --class hypr-monitor-overlay -T 'Monitor $counter' -e sh -c 'printf \"\n\n\n\033[1;32m       MONITOR %s\033[0m\n\" \"$counter\"; sleep 10'"
-    
+mapfile -t monitor_names < <(hyprctl monitors -j | jq -r 'sort_by(.x) | .[].name')
+
+# Register explicit windowrules per monitor title so parallel kitty spawns never race on exec [rules]
+batch_cmds=""
+counter=1
+for name in "${monitor_names[@]}"; do
+    batch_cmds+="keyword windowrule match:class hypr-monitor-overlay, match:title ^(Monitor $counter)$, monitor $name ; "
+    ((counter++))
+done
+[ -n "$batch_cmds" ] && hyprctl --batch "$batch_cmds" >/dev/null
+
+# Launch kitty as an overlay on each monitor
+counter=1
+for name in "${monitor_names[@]}"; do
+    kitty --class hypr-monitor-overlay -T "Monitor $counter" -e sh -c "printf '\n\n\n\033[1;32m       MONITOR %s\033[0m\n' '$counter'; sleep 10" >/dev/null 2>&1 &
     ((counter++))
 done

@@ -1,2 +1,2 @@
 #!/bin/bash
-pkill -f "hypr-monitor-overlay"
+pkill -f "kitty --class hypr-monitor-overlay"
