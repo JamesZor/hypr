@@ -1,10 +1,29 @@
 #!/usr/bin/env bash
 
 # Directory of monitor profiles
-PROFILES_DIR="$HOME/.config/hypr/hyprland/profiles"
-MONITORS_CONF="$HOME/.config/hypr/hyprland/monitors.conf"
+PROFILES_DIR="$HOME/.config/hypr/lua/profiles"
+ACTIVE_PROFILE_FILE="$HOME/.config/hypr/lua/state/active_profile.lua"
 HYPRPAPER_CONF="$HOME/.config/hypr/hyprpaper.conf"
 WALLPAPERS_DIR="$HOME/.config/hypr/wallpapers"
+
+# Print "<output>\t<mode>" for each enabled monitor of a Lua profile
+profile_monitors() {
+    lua - "$1" <<'LUA'
+        local p = dofile(arg[1])
+        for _, m in ipairs((type(p) == "table" and p.monitors) or {}) do
+            if not m.disabled and m.mode ~= "disable" then
+                print((m.output or "") .. "\t" .. (m.mode or ""))
+            end
+        end
+LUA
+}
+
+# Name of the active profile from lua/state/active_profile.lua
+active_profile() {
+    lua - "$ACTIVE_PROFILE_FILE" 2>/dev/null <<'LUA'
+local n = dofile(arg[1]); if type(n) == "string" then print(n) end
+LUA
+}
 
 # Function to generate dynamic hyprpaper.conf with random wallpapers for a profile
 randomize_wallpapers() {
@@ -14,7 +33,7 @@ randomize_wallpapers() {
     fi
 
     # Find active monitors in the profile (exclude disabled ones)
-    mapfile -t monitors < <(grep '^monitor[[:space:]]*=' "$profile_path" | grep -v 'disable' | cut -d'=' -f2- | cut -d',' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    mapfile -t monitors < <(profile_monitors "$profile_path" | cut -f1)
 
     if [ ${#monitors[@]} -eq 0 ]; then
         return 0
@@ -35,10 +54,9 @@ randomize_wallpapers() {
 
     # Monitor resolutions from the profile (e.g. "3440x1440"), keyed by monitor
     declare -A monitor_res
-    while IFS=',' read -r name mode _; do
-        name=$(echo "$name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        monitor_res["$name"]=$(echo "$mode" | sed 's/^[[:space:]]*//;s/@.*//')
-    done < <(grep '^monitor[[:space:]]*=' "$profile_path" | grep -v 'disable' | cut -d'=' -f2-)
+    while IFS=$'\t' read -r name mode; do
+        monitor_res["$name"]=${mode%%@*}
+    done < <(profile_monitors "$profile_path")
 
     # Randomly assign a wallpaper to each active monitor
     declare -A preloads
@@ -107,40 +125,51 @@ normalize_workspaces() {
     focused_mon=$(hyprctl monitors -j | jq -r '.[] | select(.focused==true).name // empty')
 
     while read -r mon_json; do
-        local mon_id mon_name active_ws min_ws max_ws default_ws
+        local mon_id mon_name active_ws active_addr min_ws max_ws default_ws ws_filter
         mon_id=$(echo "$mon_json" | jq -r '.id')
         mon_name=$(echo "$mon_json" | jq -r '.name')
-        active_ws=$(echo "$mon_json" | jq -r '.activeWorkspace.id')
+        # Hyprland 0.57+ omits the id of named/special workspaces; 0.56 gives them a negative id
+        active_ws=$(echo "$mon_json" | jq -r '.activeWorkspace.id // empty')
+        active_addr=$(echo "$mon_json" | jq -r '.activeWorkspace.address // empty')
 
         min_ws=$(( mon_id * 100 + 1 ))
         max_ws=$(( mon_id * 100 + 10 ))
         default_ws=$min_ws
 
-        if (( active_ws < min_ws || active_ws > max_ws )); then
-            # Move any windows from the unbound fallback workspace onto default_ws
-            while read -r addr; do
-                [ -n "$addr" ] && hyprctl dispatch movetoworkspacesilent "$default_ws,address:$addr" >/dev/null
-            done < <(hyprctl clients -j | jq -r ".[] | select(.workspace.id == $active_ws) | .address")
+        # A workspace without a numeric id is out of bank, like a negative id was
+        if [[ ! "$active_ws" =~ ^-?[0-9]+$ ]] || (( active_ws < min_ws || active_ws > max_ws )); then
+            # Windows on that same workspace: by id when present, otherwise by workspace address
+            ws_filter=""
+            if [[ "$active_ws" =~ ^-?[0-9]+$ ]]; then
+                ws_filter=".workspace.id == $active_ws"
+            elif [ -n "$active_addr" ]; then
+                ws_filter='.workspace.address == $addr'
+            fi
 
-            hyprctl dispatch focusmonitor "$mon_name" >/dev/null
-            hyprctl dispatch workspace "$default_ws" >/dev/null
+            # Move any windows from the unbound fallback workspace onto default_ws
+            if [ -n "$ws_filter" ]; then
+                while read -r addr; do
+                    [ -n "$addr" ] && hyprctl eval "hl.dispatch(hl.dsp.window.move({ workspace = '$default_ws', window = 'address:$addr', follow = false }))" >/dev/null
+                done < <(hyprctl clients -j | jq -r --arg addr "$active_addr" ".[] | select($ws_filter) | .address")
+            fi
+
+            hyprctl eval "hl.dispatch(hl.dsp.focus({ monitor = '$mon_name' }))" >/dev/null
+            hyprctl eval "hl.dispatch(hl.dsp.focus({ workspace = '$default_ws' }))" >/dev/null
         fi
     done < <(hyprctl monitors -j | jq -c '.[]')
 
-    [ -n "$focused_mon" ] && hyprctl dispatch focusmonitor "$focused_mon" >/dev/null
+    [ -n "$focused_mon" ] && hyprctl eval "hl.dispatch(hl.dsp.focus({ monitor = '$focused_mon' }))" >/dev/null
 }
 
 # --- Main Logic ---
 
 # Check if we just want to randomize the current profile (e.g. on boot)
 if [ "$1" = "--randomize" ]; then
-    # Detect the active profile from the monitors.conf symlink
-    if [ -L "$MONITORS_CONF" ]; then
-        ACTIVE_PROFILE=$(readlink -f "$MONITORS_CONF")
-        if [ -f "$ACTIVE_PROFILE" ]; then
-            randomize_wallpapers "$ACTIVE_PROFILE"
-            exit 0
-        fi
+    # Detect the active profile from lua/state/active_profile.lua
+    ACTIVE_PROFILE=$(active_profile)
+    if [ -n "$ACTIVE_PROFILE" ] && [ -f "$PROFILES_DIR/$ACTIVE_PROFILE.lua" ]; then
+        randomize_wallpapers "$PROFILES_DIR/$ACTIVE_PROFILE.lua"
+        exit 0
     fi
     exit 1
 fi
@@ -153,13 +182,16 @@ if [ -z "$SELECTED" ]; then
     exit 0
 fi
 
-PROFILE_FILE=$(echo "$SELECTED" | tr '[:upper:]' '[:lower:]').conf
+PROFILE_NAME=$(echo "$SELECTED" | tr '[:upper:]' '[:lower:]')
+PROFILE_FILE=$PROFILE_NAME.lua
 PROFILE_PATH="$PROFILES_DIR/$PROFILE_FILE"
 
 if [ -f "$PROFILE_PATH" ]; then
-    # Symlink the display layout
-    ln -sf "$PROFILE_PATH" "$MONITORS_CONF"
-    
+    # Record the active profile (read by lua/modules/workspaces.lua); atomic replace
+    tmp_state=$(mktemp "$(dirname "$ACTIVE_PROFILE_FILE")/.active_profile.XXXXXX")
+    printf 'return "%s"\n' "$PROFILE_NAME" > "$tmp_state"
+    mv "$tmp_state" "$ACTIVE_PROFILE_FILE"
+
     # Reload Hyprland
     hyprctl reload
 

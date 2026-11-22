@@ -1,0 +1,8 @@
+hl.env("XDG_CURRENT_DESKTOP", "hyprland")
+hl.env("XDG_SESSION_TYPE", "wayland")
+hl.env("XDG_SESSION_DESKTOP", "hyprland")
+hl.env("XCURSOR_SIZE", "24")
+hl.env("HYPRCURSOR_SIZE", "24")
+hl.env("XCURSOR_THEME", "Adwaita")
+hl.env("HYPRCURSOR_THEME", "Adwaita")
+hl.env("QT_QPA_PLATFORMTHEME", "qt5ct")
