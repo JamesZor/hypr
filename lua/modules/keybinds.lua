@@ -180,6 +180,146 @@ hl.bind(k(mainMod, "mouse:273"), hl.dsp.window.resize(), { mouse = true })
 -- tmux-style monitor move mode
 hl.bind(k(mainMod, "M"), both(hl.dsp.exec_cmd("~/.config/hypr/scripts/monitor_overlay.sh"), hl.dsp.submap("movemode")))
 
+-- Whole-workspace transfer from move mode (D-072). Bank lookup reuses the E4/01 rule above.
+local OVERLAY_CLASS = "hypr-monitor-overlay"
+local KILL_OVERLAY = "~/.config/hypr/scripts/kill_monitor_overlay.sh"
+
+local function field(obj, k)
+  if obj == nil then return nil end
+  local ok, v = pcall(function() return obj[k] end)
+  if ok then return v end
+  return nil
+end
+
+local function bank_of(name, desc)
+  if type(bank_rules) ~= "table" then return nil end
+  for _, w in ipairs(bank_rules) do
+    if w.default == true and w.enabled ~= false and selector_matches(w.monitor, name, desc) then
+      return whole(w.workspace)
+    end
+  end
+  return nil
+end
+
+local function ws_number(ws)
+  if ws == nil or field(ws, "special") == true then return nil end
+  local id = field(ws, "id")
+  if type(id) ~= "number" then return nil end
+  id = math.tointeger(id)
+  if id and id >= 1 then return id end
+  return nil
+end
+
+local function mon_info(m)
+  local name = field(m, "name")
+  if type(name) ~= "string" then return nil end
+  local num = function(v) return type(v) == "number" and v or 0 end
+  local x, y = num(field(m, "x")), num(field(m, "y"))
+  local w, h = num(field(m, "width")), num(field(m, "height"))
+  return { name = name, desc = field(m, "description"), x = x, y = y, cx = x + w / 2, cy = y + h / 2,
+    shows = ws_number(field(m, "active_workspace")) }
+end
+
+local function pick_destination(src, mons, how)
+  if type(how) == "number" then
+    local sorted = {}
+    for i, m in ipairs(mons) do sorted[i] = m end
+    table.sort(sorted, function(a, b)
+      if a.x ~= b.x then return a.x < b.x end
+      if a.y ~= b.y then return a.y < b.y end
+      return a.name < b.name
+    end)
+    return sorted[how], "no screen " .. how
+  end
+  local best, bp, bs
+  for _, m in ipairs(mons) do
+    if m.name ~= src.name then
+      local p, s
+      if how == "left" then p, s = src.cx - m.cx, math.abs(m.cy - src.cy)
+      elseif how == "right" then p, s = m.cx - src.cx, math.abs(m.cy - src.cy)
+      elseif how == "up" then p, s = src.cy - m.cy, math.abs(m.cx - src.cx)
+      else p, s = m.cy - src.cy, math.abs(m.cx - src.cx) end
+      if p > 0 and (best == nil or p < bp or (p == bp and s < bs)) then best, bp, bs = m, p, s end
+    end
+  end
+  return best, "no screen " .. how
+end
+
+local function transfer(how)
+  local src = mon_info(hl.get_active_monitor())
+  if not src then return notify("no focused monitor") end
+  local wid = src.shows
+  if not wid then return notify("this workspace cannot be moved (named or special)") end
+  -- Snapshot every window: workspace number, screen, overlay or not
+  local all = {}
+  for _, w in ipairs(hl.get_windows() or {}) do
+    local ws = field(w, "workspace")
+    local addr = field(w, "address")
+    local fh = field(w, "focus_history_id")
+    all[#all + 1] = { addr = type(addr) == "string" and addr or nil, ws = ws_number(ws),
+      mon = field(field(w, "monitor"), "name") or field(field(ws, "monitor"), "name"),
+      overlay = field(w, "class") == OVERLAY_CLASS, focus = type(fh) == "number" and fh or nil }
+  end
+  local moving = {}
+  for _, w in ipairs(all) do
+    if w.ws == wid and not w.overlay and w.addr then moving[#moving + 1] = w end
+  end
+  if #moving == 0 then return notify("workspace " .. wid .. " has no windows to move") end
+  local mons = {}
+  for _, m in ipairs(hl.get_monitors() or {}) do
+    local i = mon_info(m)
+    if i then mons[#mons + 1] = i end
+  end
+  local dst, why = pick_destination(src, mons, how)
+  if not dst then return notify(why) end
+  if dst.name == src.name then return end
+  local start = bank_of(dst.name, dst.desc)
+  if not start then return notify("no workspace bank for " .. dst.name) end
+  local used = {}
+  for _, w in ipairs(all) do if w.ws and not w.overlay then used[w.ws] = true end end
+  local shown = {}
+  for _, m in ipairs(mons) do if m.shows then shown[m.shows] = m.name end end
+  local target
+  for n = start, start + 9 do
+    if not used[n] and not shown[n] then target = n break end
+  end
+  if not target then return notify("workspace bank of " .. dst.name .. " is full") end
+  for _, w in ipairs(moving) do
+    hl.dispatch(hl.dsp.window.move({ workspace = target, window = "address:" .. w.addr, follow = false }))
+  end
+  -- Source shows its most recently used remaining workspace, else its bank start
+  local back, bf
+  for _, w in ipairs(all) do
+    if w.ws and w.ws ~= wid and not w.overlay and w.mon == src.name and w.focus and w.focus >= 0
+      and (bf == nil or w.focus < bf) then
+      back, bf = w.ws, w.focus
+    end
+  end
+  if not back then
+    local s = bank_of(src.name, src.desc)
+    if s and (shown[s] == nil or shown[s] == src.name) then
+      local okw, ws = pcall(hl.get_workspace, s)
+      local home = okw and ws and field(field(ws, "monitor"), "name") or nil
+      if home == nil or home == src.name then back = s end
+    end
+  end
+  if back then
+    hl.dispatch(hl.dsp.focus({ monitor = src.name }))
+    hl.dispatch(hl.dsp.focus({ workspace = back }))
+  end
+  hl.dispatch(hl.dsp.focus({ monitor = dst.name }))
+  hl.dispatch(hl.dsp.focus({ workspace = target }))
+end
+
+local function transfer_key(how)
+  return function()
+    local ok = pcall(transfer, how)
+    if not ok then notify("workspace move failed") end
+    pcall(hl.dispatch, hl.dsp.exec_cmd(KILL_OVERLAY))
+    pcall(hl.dispatch, hl.dsp.submap("reset"))
+  end
+end
+
 hl.define_submap("movemode", function()
   local function leave(key, cmd)
     hl.bind(key, both(hl.dsp.exec_cmd(cmd), hl.dsp.submap("reset")))
@@ -191,6 +331,9 @@ hl.define_submap("movemode", function()
   leave("right", "~/.config/hypr/scripts/move_to_monitor_dir.sh r")
   leave("up", "~/.config/hypr/scripts/move_to_monitor_dir.sh u")
   leave("down", "~/.config/hypr/scripts/move_to_monitor_dir.sh d")
+  for _, how in ipairs({ 1, 2, 3, "left", "right", "up", "down" }) do
+    hl.bind("SHIFT + " .. how, transfer_key(how))
+  end
   leave("escape", "~/.config/hypr/scripts/kill_monitor_overlay.sh")
   leave("catchall", "~/.config/hypr/scripts/kill_monitor_overlay.sh")
 end)
