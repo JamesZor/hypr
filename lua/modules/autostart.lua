@@ -1,7 +1,6 @@
 hl.on("hyprland.start", function()
   hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP=hyprland")
-  hl.exec_cmd("gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'")
-  hl.exec_cmd("gsettings set org.gnome.desktop.interface gtk-theme 'Adwaita-dark'")
+  hl.exec_cmd("bash ~/.config/hypr/scripts/theme.sh apply")
   hl.exec_cmd("/home/james/.config/hypr/scripts/switch_monitors.sh --randomize")
   hl.exec_cmd("hyprsunset")
 end)

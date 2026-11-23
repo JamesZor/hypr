@@ -7,7 +7,7 @@ for _, name in ipairs({ "settings", "env", "animations" }) do
   end
 end
 
-for _, name in ipairs({ "keybinds", "windowrules", "workspaces", "autostart" }) do
+for _, name in ipairs({ "keybinds", "windowrules", "workspaces", "autostart", "theme" }) do
   local ok, res = pcall(require, "lua.modules." .. name)
   if not ok or res ~= true then
     hl.notification.create({ text = "hypr: module " .. name .. " failed to load", duration = 10000 })

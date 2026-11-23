@@ -160,6 +160,7 @@ hl.bind(k(mainMod, "R"), hl.dsp.exec_cmd(menu .. " $focusRofi"))
 hl.bind(k(mainMod, "P"), hl.dsp.window.pseudo())
 hl.bind(k(mainMod .. " + SHIFT", "M"), hl.dsp.exec_cmd("~/.config/hypr/scripts/switch_monitors.sh"))
 hl.bind(k(mainMod, "T"), hl.dsp.exec_cmd("~/.config/hypr/scripts/switch_layout.sh"))
+hl.bind("SUPER + SHIFT + T", hl.dsp.exec_cmd("bash ~/.config/hypr/scripts/theme.sh toggle"))
 hl.bind(k(mainMod, "Tab"), hl.dsp.layout("cyclenext"))
 hl.bind(k(mainMod, "y"), hl.dsp.exec_cmd("~/.config/hypr/scripts/open-alacritty-here.sh"))
 
