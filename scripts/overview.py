@@ -13,10 +13,13 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import unicodedata
 
 
 DIGITS = "1234567890"
+VIM_KEYS = {"j": "Down", "k": "Up", "h": "Left", "l": "Right"}
+ALIASES_PATH = Path(__file__).resolve().with_name("overview-aliases.json")
 
 
 def records(value):
@@ -110,16 +113,29 @@ def write_names(path, names):
                 temporary.unlink(missing_ok=True)
 
 
+def monitor_matches(selector, monitor, description):
+    if selector.startswith("desc:"):
+        return description.startswith(selector[5:].strip())
+    return monitor == selector
+
+
 def bank_start(rules, monitor, description):
     for rule in rules:
         selector = rule.get("monitor")
         if rule.get("default") is not True or rule.get("enabled") is False or not isinstance(selector, str):
             continue
-        matches = (description.startswith(selector[5:].strip()) if selector.startswith("desc:")
-                   else monitor == selector)
-        if matches:
+        if monitor_matches(selector, monitor, description):
             return decimal(rule.get("workspaceString"))
     return None
+
+
+def read_aliases():
+    with suppress(OSError, ValueError, RecursionError):
+        raw = json.loads(ALIASES_PATH.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            return {selector: alias for selector, value in raw.items()
+                    if (alias := text(value).strip()[:32].strip())}
+    return {}
 
 
 def windows_by_workspace(clients):
@@ -145,6 +161,7 @@ def read_screens(names):
     workspaces = query("workspaces")
     windows = windows_by_workspace(query("clients"))
     rules = query("workspacerules")
+    aliases = read_aliases()
     live = {wid: ws for ws in workspaces if (wid := workspace_id(ws)) is not None}
     by_monitor = defaultdict(list)
     for wid, ws in live.items():
@@ -180,7 +197,9 @@ def read_screens(names):
                 "shown": ws is not None and wid == active,
                 "windows": windows.get(wid, []) if ws is not None else [],
             })
-        screens.append({"monitor": connector, "description": description,
+        alias = next((value for selector, value in aliases.items()
+                      if monitor_matches(selector, connector, description)), None)
+        screens.append({"monitor": connector, "description": description, "alias": alias,
                         "focused": monitor.get("focused") is True, "workspaces": rows})
     return screens, live
 
@@ -262,6 +281,9 @@ class Overview:
         if self.selected is None or not isinstance(key, str):
             return
 
+        if len(key) == 1:
+            key = key.lower()
+            key = VIM_KEYS.get(key, key)
         index = next(i for i, (_, row) in enumerate(self.rows) if row["id"] == self.selected)
         screen, row = self.rows[index]
         if key == "r":
@@ -346,150 +368,198 @@ def release_pid(path):
 
 def display_text(value):
     # Keep external strings on one line and suitable for GTK's UTF-8 C strings.
-    return (value.replace("\0", "�").replace("\n", " ").replace("\r", " ")
+    return (re.sub(r"[\r\n\u2028\u2029]", " ", value).replace("\0", "�")
             .encode("utf-8", errors="replace").decode("utf-8"))
 
 
-class StartupCancelled(Exception):
-    pass
-
-
-def run_gui(names_path, stopping):
+def run_gui(names_path, finish):
     from gi import require_version
 
     require_version("Gdk", "3.0")
     require_version("Gtk", "3.0")
     require_version("GtkLayerShell", "0.1")
-    from gi.repository import Gdk, GLib, Gtk, GtkLayerShell, Pango
+    from gi.repository import Gdk, Gtk, GtkLayerShell, Pango
 
     if not Gtk.init_check([])[0] or not GtkLayerShell.is_supported():
         raise RuntimeError("a Wayland display with layer-shell support is required")
     overview = Overview(names_path)
 
-    window = None
-    closing = False
-    gui_error = None
+    window = Gtk.Window(decorated=False)
+    window.set_name("workspace-overview")
+    window.connect("delete-event", lambda *_: finish(0))
+    GtkLayerShell.init_for_window(window)
+    GtkLayerShell.set_layer(window, GtkLayerShell.Layer.OVERLAY)
+    GtkLayerShell.set_keyboard_mode(window, GtkLayerShell.KeyboardMode.EXCLUSIVE)
+    # Leave anchors, exclusive zone and monitor at their defaults.
+    window.set_border_width(12)
 
-    def close_window(*_, destroying=False):
-        nonlocal closing, gui_error
-        if closing:
-            return GLib.SOURCE_REMOVE
-        closing = True
+    css = Gtk.CssProvider()
+    css.load_from_data(b"""
+        #workspace-overview, #workspace-overview textview, #workspace-overview textview text {
+            background-color: #282828;
+            background-image: none;
+            color: #ebdbb2;
+            font-family: monospace;
+        }
+        #workspace-overview label {
+            color: #d8a657;
+            font-family: monospace;
+        }
+    """)
+    Gtk.StyleContext.add_provider_for_screen(window.get_screen(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    window.add(box)
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    # The minimum request persists after the layer-shell configure.
+    scroll.set_size_request(760, 460)
+    box.pack_start(scroll, True, True, 0)
+    view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True,
+                        wrap_mode=Gtk.WrapMode.WORD_CHAR, can_focus=False)
+    scroll.add(view)
+    body = view.get_buffer()
+    prompt = Gtk.Label(xalign=0, no_show_all=True)
+    prompt.set_line_wrap(True)
+    box.pack_end(prompt, False, False, 0)
+
+    alternate = body.create_tag("alternate", paragraph_background="#32302f")
+    selected = body.create_tag("selected", paragraph_background="#687b31",
+                               foreground="#fbf1c7", weight=Pango.Weight.BOLD)
+    # The higher-priority name and marker tags retain their accent on the selected row.
+    name_tag = body.create_tag("name", foreground="#d8a657")
+    shown_tag = body.create_tag("shown", foreground="#a9b665")
+    header_tag = body.create_tag("header", foreground="#a9b665", weight=Pango.Weight.BOLD)
+    detail_tag = body.create_tag("detail", foreground="#a89984")
+    app_tag = body.create_tag("app", foreground="#a89984", weight=Pango.Weight.BOLD)
+
+    def render():
+        chunks = []
+        styles = []
+        offset = selected_offset = 0
+
+        def line(*parts, row_style=None):
+            nonlocal offset
+            if chunks:
+                chunks.append("\n")
+                offset += 1
+            start = offset
+            for value, tag in parts:
+                value = display_text(value)
+                chunks.append(value)
+                end = offset + len(value)
+                if tag is not None and end > offset:
+                    styles.append((tag, offset, end))
+                offset = end
+            if row_style is not None:
+                styles.append((row_style, start, offset))
+            return start
+
+        for index, screen in enumerate(overview.screens):
+            if index:
+                line(("", None))
+            connector = screen["monitor"]
+            if screen["alias"]:
+                header = f"{screen['alias']} ({connector})"
+            elif screen["description"]:
+                header = f"{connector} — {screen['description']}"
+            else:
+                header = connector
+            line((header, header_tag))
+            for i, row in enumerate(screen["workspaces"]):
+                is_selected = row["id"] == overview.selected
+                number = row["slot"] if row["slot"] is not None else row["id"]
+                name = f"  {row['name']}" if row["name"] else ""
+                apps = ", ".join(win["app"] for win in row["windows"])
+                suffix = f"  [{apps}]" if apps else ""
+                marker = ("●", shown_tag) if row["shown"] else (" ", None)
+                row_style = selected if is_selected else alternate if i % 2 else None
+                row_offset = line(marker, (f" {number:>2}", None), (name, name_tag), (suffix, None),
+                                  row_style=row_style)
+                if is_selected:
+                    selected_offset = row_offset
+                    for win in row["windows"]:
+                        line(("     " + win["app"], app_tag), (": " + win["title"], detail_tag))
+
+        body.set_text("".join(chunks) if chunks else "No screens")
+        for tag, start, end in styles:
+            body.apply_tag(tag, body.get_iter_at_offset(start), body.get_iter_at_offset(end))
+        body.place_cursor(body.get_iter_at_offset(selected_offset))
+        view.scroll_to_mark(body.get_insert(), 0.05, False, 0, 0)
+        prompt.set_text(display_text("Name: " + overview.buffer))
+        prompt.set_visible(overview.mode == "rename")
+
+    modifiers = Gdk.ModifierType
+    ignored = modifiers.CONTROL_MASK | modifiers.MOD1_MASK | modifiers.SUPER_MASK | modifiers.MOD4_MASK
+
+    def on_key(_window, event):
         try:
-            # GTK hides and unrealizes a window before emitting ::destroy.
-            # On that path, don't try to destroy it a second time.
-            if window is not None and not destroying:
-                try:
-                    window.hide()
-                finally:
-                    window.destroy()
-            display = Gdk.Display.get_default()
-            if display is not None:
-                display.flush()
-        except Exception as exc:
-            gui_error = exc
-        finally:
-            if Gtk.main_level():
-                Gtk.main_quit()
-        return GLib.SOURCE_REMOVE
+            if event.state & ignored:
+                return True
+            keyval = event.keyval
+            key = Gdk.keyval_name(keyval)
+            if key not in ("Up", "Down", "Left", "Right", "Return", "KP_Enter", "Escape", "BackSpace"):
+                codepoint = Gdk.keyval_to_unicode(keyval)
+                if not codepoint:
+                    return False
+                char = chr(codepoint)
+                if overview.mode == "rename":
+                    if not (char.isprintable() or unicodedata.category(char) == "Zs"):
+                        return False
+                    key = {"text": char}
+                else:
+                    key = char.lower()
+                    if key not in VIM_KEYS and key != "r" and key not in DIGITS:
+                        return False
+            overview.key(key)
+            if overview.closed:
+                finish(0)
+            render()
+        except BaseException as exc:
+            finish(1, exc)
+        return True
+
+    window.connect("key-press-event", on_key)
+    render()
+    window.show_all()
+    Gtk.main()
+    finish(0)  # Keep the window alive until the process exits, even if the loop returns.
+
+
+def run_popup(names_path, pid_path):
+    closing = threading.Lock()
+
+    def finish(status, error=None):
+        with closing:
+            try:
+                release_pid(pid_path)
+                if error is not None:
+                    print(f"overview: {error}", file=sys.stderr, flush=True)
+            finally:
+                # Do not enter GTK teardown or wait for its threads at interpreter shutdown.
+                os._exit(status)
+
+    signals = {signal.SIGTERM, signal.SIGINT}
+
+    def wait_for_close_signal():
+        try:
+            received = signal.sigwait(signals)
+        except BaseException as exc:
+            finish(1, exc)
+        else:
+            finish(0 if received == signal.SIGTERM else 1)
 
     try:
-        if stopping():
-            return
-        window = Gtk.Window(decorated=False)
-        window.connect("destroy", lambda _: close_window(destroying=True))
-        GtkLayerShell.init_for_window(window)
-        GtkLayerShell.set_layer(window, GtkLayerShell.Layer.OVERLAY)
-        GtkLayerShell.set_keyboard_mode(window, GtkLayerShell.KeyboardMode.EXCLUSIVE)
-        # Leave anchors, exclusive zone and monitor at their defaults.
-        window.set_border_width(12)
-
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        window.add(box)
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        # The minimum request persists after the layer-shell configure.
-        scroll.set_size_request(760, 460)
-        box.pack_start(scroll, True, True, 0)
-        view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True,
-                            wrap_mode=Gtk.WrapMode.WORD_CHAR, can_focus=False)
-        scroll.add(view)
-        body = view.get_buffer()
-        prompt = Gtk.Label(xalign=0, no_show_all=True)
-        font = Pango.AttrList()
-        font.insert(Pango.attr_family_new("monospace"))
-        prompt.set_attributes(font)
-        prompt.set_line_wrap(True)
-        box.pack_end(prompt, False, False, 0)
-
-        def render():
-            lines = []
-            selected_line = 0
-            for screen in overview.screens:
-                header = screen["monitor"]
-                if screen["description"]:
-                    header += " — " + screen["description"]
-                if lines:
-                    lines.append("")
-                lines.append(display_text(header))
-                for row in screen["workspaces"]:
-                    selected = row["id"] == overview.selected
-                    if selected:
-                        selected_line = len(lines)
-                    number = row["slot"] if row["slot"] is not None else row["id"]
-                    name = f"  {row['name']}" if row["name"] else ""
-                    apps = ", ".join(win["app"] for win in row["windows"])
-                    suffix = f"  [{apps}]" if apps else ""
-                    lines.append(display_text(f"{'>' if selected else ' '} {number:>2}{name}{suffix}"))
-                    if selected:
-                        lines.extend(display_text(f"     {win['app']}: {win['title']}") for win in row["windows"])
-            body.set_text("\n".join(lines) if lines else "No screens")
-            body.place_cursor(body.get_iter_at_line(selected_line))
-            view.scroll_to_mark(body.get_insert(), 0.05, False, 0, 0)
-            prompt.set_text(display_text("Name: " + overview.buffer))
-            prompt.set_visible(overview.mode == "rename")
-
-        def on_key(_window, event):
-            nonlocal gui_error
-            try:
-                key = Gdk.keyval_name(event.keyval)
-                if key not in ("Up", "Down", "Left", "Right", "Return", "KP_Enter", "Escape", "BackSpace"):
-                    codepoint = Gdk.keyval_to_unicode(event.keyval)
-                    char = chr(codepoint) if codepoint else ""
-                    if overview.mode == "rename" and char and (char.isprintable() or unicodedata.category(char) == "Zs"):
-                        key = {"text": char}
-                    elif char and char.lower() in DIGITS + "r":
-                        key = char.lower()
-                    else:
-                        return False
-                overview.key(key)
-                if overview.closed:
-                    close_window()
-                else:
-                    render()
-            except Exception as exc:
-                gui_error = exc
-                close_window()
-            return True
-
-        window.connect("key-press-event", on_key)
-        render()
-        window.show_all()
-
-        # A Python handler interrupts startup; this source wakes a sleeping Gtk.main().
-        # Recent GI versions expose Unix helpers in the GLibUnix namespace instead.
-        add_signal = getattr(GLib, "unix_signal_add", None)
-        if add_signal is None:
-            from gi.repository import GLibUnix
-
-            add_signal = GLibUnix.signal_add
-        add_signal(GLib.PRIORITY_HIGH, signal.SIGTERM, close_window, None)
-        if not stopping() and not closing:
-            Gtk.main()
-    finally:
-        close_window()
-        if gui_error is not None:
-            raise gui_error
+        # Queue signals even during the pid-file transaction. Start waiting only after
+        # it unlocks, but before importing GTK; no reliance on GTK's main loop or on
+        # a Python signal handler getting time on the main thread during startup.
+        signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+        if not toggle(pid_path, dry_run=False):
+            threading.Thread(target=wait_for_close_signal, daemon=True).start()
+            run_gui(names_path, finish)
+    except BaseException as exc:
+        finish(1, exc)
+    finish(0)
 
 
 def main():
@@ -526,38 +596,7 @@ def main():
         print("closed" if toggle(pid_path, dry_run=True) else "open")
         return 0
 
-    terminated = False
-    starting = False
-
-    def stop_startup(*_):
-        nonlocal terminated
-        if not terminated:
-            terminated = True
-            # Do not interrupt the pid-file transaction or its cleanup.
-            if starting:
-                raise StartupCancelled
-
-    status = 1
-    try:
-        signal.signal(signal.SIGTERM, stop_startup)
-        if not toggle(pid_path, dry_run=False):
-            try:
-                starting = True
-                if not terminated:
-                    run_gui(names_path, lambda: terminated)
-            finally:
-                starting = False
-        status = 0
-    except StartupCancelled:
-        status = 0
-    except Exception as exc:
-        print(f"overview: {exc}", file=sys.stderr, flush=True)
-    finally:
-        try:
-            release_pid(pid_path)
-        finally:
-            # GTK/Pango worker threads can deadlock Python's interpreter shutdown.
-            os._exit(status)
+    run_popup(names_path, pid_path)
 
 
 if __name__ == "__main__":
