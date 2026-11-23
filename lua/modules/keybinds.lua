@@ -128,9 +128,6 @@ for key = 0, 9 do
   hl.bind("SUPER + SHIFT + " .. key, number_key(slot, function(t) return hl.dsp.window.move(t) end))
 end
 
--- Swapping workspaces between monitors
-hl.bind("SUPER + SHIFT + S", hl.dsp.workspace.swap_monitors({ monitor1 = "0", monitor2 = "1" }))
-
 -- Monitor focus switching
 hl.bind("SUPER + period", hl.dsp.focus({ monitor = "+1" }))
 hl.bind("SUPER + comma", hl.dsp.focus({ monitor = "-1" }))
@@ -320,6 +317,60 @@ local function transfer_key(how)
   end
 end
 
+-- Swap window sets, not workspaces (D-075). An open special workspace also blocks a swap.
+local function swap_mon_info(m)
+  local info = mon_info(m)
+  if info and field(m, "active_special_workspace") ~= nil then info.shows = nil end
+  return info
+end
+
+local function swap(how)
+  local src = swap_mon_info(hl.get_active_monitor())
+  if not src then return "no focused monitor" end
+  local mons = {}
+  for _, m in ipairs(hl.get_monitors() or {}) do
+    local i = swap_mon_info(m)
+    if i then mons[#mons + 1] = i end
+  end
+  local dst, why = pick_destination(src, mons, how)
+  if not dst then return why end
+  if dst.name == src.name then return end
+  local a, b = src.shows, dst.shows
+  if not a or not b then return "cannot swap a named or special workspace" end
+
+  -- Snapshot addresses in both directions before dispatching either move.
+  local from_a, from_b = {}, {}
+  for _, w in ipairs(hl.get_windows() or {}) do
+    local ws = ws_number(w.workspace)
+    if (ws == a or ws == b) and w.class ~= OVERLAY_CLASS then
+      local addr = w.address
+      if type(addr) ~= "string" or addr == "" then return "cannot read window address for swap" end
+      local from = ws == a and from_a or from_b
+      from[#from + 1] = addr
+    end
+  end
+  if #from_a == 0 and #from_b == 0 then return "neither workspace has windows to swap" end
+
+  local function move_to(addresses, workspace)
+    for _, addr in ipairs(addresses) do
+      hl.dispatch(hl.dsp.window.move({ workspace = workspace, window = "address:" .. addr, follow = false }))
+    end
+  end
+  move_to(from_a, b)
+  move_to(from_b, a)
+end
+
+local function swap_key(how)
+  return function()
+    local ok, why = pcall(swap, how)
+    if not ok then why = "workspace swap failed" end
+    if why then pcall(notify, why) end
+    -- Protect dispatcher creation too, and still reset if the overlay command fails.
+    pcall(function() hl.dispatch(hl.dsp.exec_cmd(KILL_OVERLAY)) end)
+    pcall(function() hl.dispatch(hl.dsp.submap("reset")) end)
+  end
+end
+
 hl.define_submap("movemode", function()
   local function leave(key, cmd)
     hl.bind(key, both(hl.dsp.exec_cmd(cmd), hl.dsp.submap("reset")))
@@ -333,6 +384,7 @@ hl.define_submap("movemode", function()
   leave("down", "~/.config/hypr/scripts/move_to_monitor_dir.sh d")
   for _, how in ipairs({ 1, 2, 3, "left", "right", "up", "down" }) do
     hl.bind("SHIFT + " .. how, transfer_key(how))
+    hl.bind("CTRL + " .. how, swap_key(how))
   end
   leave("escape", "~/.config/hypr/scripts/kill_monitor_overlay.sh")
   leave("catchall", "~/.config/hypr/scripts/kill_monitor_overlay.sh")
