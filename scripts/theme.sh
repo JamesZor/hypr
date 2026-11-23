@@ -59,14 +59,14 @@ stage() {
 
 build() {
     local file bundle dir i j
-    local -a generated=(kitty.conf rofi.rasi gtk3.css gtk4.css)
+    local -a generated=(kitty.conf rofi.rasi gtk3.css gtk4.css qt6ct-colors.conf)
     local -a rendered=() staged=() originals=() published=()
 
     # Validate both palettes and render everything before creating any files.
     bundle=$(lua "${script%/*}/theme_gen.lua" "${script%/*}/../theme/palette.lua" "$mode") || return 1
     mapfile -td $'\x1e' rendered < <(printf '%s' "$bundle")
-    [[ ${#rendered[@]} == 5 ]] || return 1
-    eval_lua=${rendered[4]}
+    ((${#rendered[@]} == ${#generated[@]} + 1)) || return 1
+    eval_lua=${rendered[${#generated[@]}]}
 
     for file in "${generated[@]}"; do
         file=$state/$file
@@ -113,6 +113,11 @@ build() {
     build_dirs=()
 }
 
+publish_backup() {
+    # Publish the completed backup without ever overwriting an existing one.
+    ln -T -- "$1" "$2" || [[ -e $2 || -L $2 ]]
+}
+
 backup() {
     local file=$1 backup=$1.pre-e6
     [[ ! -d $file ]] || return 1
@@ -122,8 +127,30 @@ backup() {
     [[ -f $file && -r $file ]] || return 1
     if head -n 1 -- "$file" | grep -aF 'hypr-theme' >/dev/null; then return 0; fi
     stage "$backup" && cat -- "$file" >"$temp" || return 1
-    # Publish the completed backup without ever overwriting an existing one.
-    ln -T -- "$temp" "$backup" || [[ -e $backup || -L $backup ]]
+    publish_backup "$temp" "$backup"
+}
+
+save_merged() {
+    local file=$config/$1 backup=$config/$1.pre-e6
+    local input='' snapshot='' needs_backup
+    mkdir -p -- "${file%/*}" || return 1
+    if [[ -e $file || -L $file ]]; then
+        [[ -f $file ]] || return 1
+        input=$file
+        if [[ ! -e $backup && ! -L $backup ]]; then
+            # Parse the same bytes that would be published as the backup.
+            stage "$backup" && cat -- "$file" >"$temp" || return 1
+            snapshot=$temp
+            input=$snapshot
+        fi
+    fi
+    stage "$file" || return 1
+    needs_backup=$(lua "${script%/*}/theme_gen.lua" "${script%/*}/../theme/palette.lua" "$mode" \
+        "$1" "$state" "$input" "$temp") || return 1
+    if [[ -n $snapshot && $needs_backup == backup ]]; then
+        publish_backup "$snapshot" "$backup" || return 1
+    fi
+    mv -fT -- "$temp" "$file"
 }
 
 gtk_settings() {
@@ -140,8 +167,11 @@ gtk_settings() {
 save() {
     local file
     local -a owned=(rofi/config.rasi gtk-3.0/settings.ini gtk-4.0/settings.ini gtk-3.0/gtk.css gtk-4.0/gtk.css)
-    # Rofi's @theme directive needs the path on one line.
-    [[ $state != *$'\n'* && ! -d $state/mode ]] || return 1
+    # qt6ct must read the quoted scheme path literally; rofi also needs one line.
+    case $state in
+        *,*|*\"*|*\\*|*$'\n'*|*\$*) return 1 ;;
+    esac
+    [[ ! -d $state/mode ]] || return 1
     for file in "${owned[@]}"; do
         file=$config/$file
         mkdir -p -- "${file%/*}" && backup "$file" && stage "$file" || return 1
@@ -156,6 +186,7 @@ save() {
         esac
         mv -fT -- "$temp" "$file" || return 1
     done
+    save_merged qt6ct/qt6ct.conf && save_merged kdeglobals || return 1
     # Record the new mode only after the owned files have been saved.
     stage "$state/mode" && printf '%s\n' "$mode" >"$temp" && mv -fT -- "$temp" "$state/mode"
 }
@@ -188,5 +219,5 @@ if ((${#failed[@]})); then
     exit 1
 fi
 if [[ $1 == toggle ]]; then
-    notice "$mode (restart open GTK3 apps to update them)"
+    notice "$mode (restart open GTK3 and KDE apps to update them fully)"
 fi
