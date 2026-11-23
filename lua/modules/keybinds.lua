@@ -146,6 +146,7 @@ hl.bind("CTRL + SUPER + down", hl.dsp.window.move({ direction = "down" }))
 
 -- Application launching
 hl.bind(k(mainMod, "W"), hl.dsp.exec_cmd(browser))
+hl.bind(k(mainMod, "O"), hl.dsp.exec_cmd("python3 ~/.config/hypr/scripts/overview.py"))
 hl.bind(k(mainMod, "i"), hl.dsp.exec_cmd("$jupyter"))
 hl.bind(k(mainMod, "return"), hl.dsp.exec_cmd(terminal))
 hl.bind(k(mainMod, "C"), hl.dsp.window.close())
