@@ -16,8 +16,10 @@ flock -x "$lock_fd" || exit 1
 
 state_home=${XDG_STATE_HOME-}
 config=${XDG_CONFIG_HOME-}
+data=${XDG_DATA_HOME-}
 if [[ $state_home != /* ]]; then state_home=${HOME:?HOME is not set}/.local/state; fi
 if [[ $config != /* ]]; then config=${HOME:?HOME is not set}/.config; fi
+if [[ $data != /* ]]; then data=${HOME:?HOME is not set}/.local/share; fi
 state=${state_home%/}/hypr-theme
 config=${config%/}
 
@@ -153,6 +155,13 @@ save_merged() {
     mv -fT -- "$temp" "$file"
 }
 
+save_kde_scheme() {
+    local file=${data%/}/color-schemes/HyprTheme.colors
+    mkdir -p -- "${file%/*}" && backup "$file" && stage "$file" || return 1
+    lua "${script%/*}/theme_gen.lua" "${script%/*}/../theme/palette.lua" "$mode" kde-scheme >"$temp" || return 1
+    mv -fT -- "$temp" "$file"
+}
+
 gtk_settings() {
     printf '%s\n' \
         '# hypr-theme: generated' \
@@ -186,7 +195,9 @@ save() {
         esac
         mv -fT -- "$temp" "$file" || return 1
     done
-    save_merged qt6ct/qt6ct.conf && save_merged kdeglobals || return 1
+    save_merged qt6ct/qt6ct.conf || return 1
+    # Do not select the scheme in kdeglobals unless the scheme file was saved.
+    save_kde_scheme && save_merged kdeglobals || return 1
     # Record the new mode only after the owned files have been saved.
     stage "$state/mode" && printf '%s\n' "$mode" >"$temp" && mv -fT -- "$temp" "$state/mode"
 }

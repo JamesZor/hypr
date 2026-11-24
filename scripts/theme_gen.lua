@@ -1,4 +1,4 @@
--- Validate the palettes, then build the theme bundle or prepare a merged config.
+-- Validate the palettes, then build the theme bundle, KDE scheme or merged config.
 local palette_file, mode = arg[1], arg[2]
 local palette = assert(loadfile(palette_file, "t", {}))()
 local function plain_table(value)
@@ -167,8 +167,10 @@ local function rgb(col)
   return ("%d,%d,%d"):format(tonumber(col:sub(2, 3), 16), tonumber(col:sub(4, 5), 16), tonumber(col:sub(6, 7), 16))
 end
 
-local function kde_settings()
-  local groups = { { "Icons", { { "Theme", "breeze-dark", "breeze" } } } }
+local kde_scheme = "HyprTheme"
+
+local function kde_colours()
+  local groups = {}
   for _, bg in ipairs(kde_bg) do
     local function entry(name, key)
       return { name, rgb(palette.dark[key]), rgb(palette.light[key]) }
@@ -184,6 +186,25 @@ local function kde_settings()
     groups[#groups + 1] = { "Colors:" .. bg[1], colours }
   end
   return groups
+end
+
+local function kde_settings()
+  local groups = { { "Icons", { { "Theme", "breeze-dark", "breeze" } } } }
+  for _, group in ipairs(kde_colours()) do groups[#groups + 1] = group end
+  -- The first E6/02 build did not manage ColorScheme; ignore it in backup checks.
+  groups[#groups + 1] = { "UiSettings", { { "ColorScheme", kde_scheme, skip_backup = true } } }
+  return groups
+end
+
+local function render_kde_scheme()
+  local lines = { "# hypr-theme: generated\n[General]\nColorScheme=" .. kde_scheme .. "\nName=Hypr Theme\n" }
+  for _, group in ipairs(kde_colours()) do
+    lines[#lines + 1] = "[" .. group[1] .. "]\n"
+    for _, entry in ipairs(group[2]) do
+      lines[#lines + 1] = entry[1] .. "=" .. mode_value(entry, mode) .. "\n"
+    end
+  end
+  return table.concat(lines)
 end
 
 local function trim(line)
@@ -216,9 +237,11 @@ local function merge_ini(contents, groups)
         local key, value = line:match("^([^=]+)=(.*)$")
         local entry = key and current.keys[trim(key)]
         if entry then
-          value = trim(value)
-          matches_dark = matches_dark and value == mode_value(entry, "dark")
-          matches_light = matches_light and value == mode_value(entry, "light")
+          if not entry.skip_backup then
+            value = trim(value)
+            matches_dark = matches_dark and value == mode_value(entry, "dark")
+            matches_light = matches_light and value == mode_value(entry, "light")
+          end
           current.seen[entry[1]] = true
           raw = entry[1] .. "=" .. mode_value(entry, mode)
         end
@@ -233,7 +256,7 @@ local function merge_ini(contents, groups)
     local missing = {}
     for _, entry in ipairs(group[2]) do
       if not info.seen[entry[1]] then
-        matches_dark, matches_light = false, false
+        if not entry.skip_backup then matches_dark, matches_light = false, false end
         missing[#missing + 1] = entry[1] .. "=" .. mode_value(entry, mode)
       end
     end
@@ -264,6 +287,11 @@ end
 
 local p = assert(palette[mode], "invalid mode")
 local which, state, input, output = arg[3], arg[4], arg[5], arg[6]
+if which == "kde-scheme" then
+  assert(io.write(render_kde_scheme()))
+  assert(io.flush())
+  return
+end
 if which then
   local groups
   if which == "qt6ct/qt6ct.conf" then
