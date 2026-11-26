@@ -2,7 +2,7 @@
 -- including the undefined $jupyter and $focusRofi.
 local mainMod = "SUPER"
 local terminal = "kitty"
-local fileManager = "dolphin"
+local fileManager = "nautilus --new-window"
 local menu = "rofi -show drun"
 local browser = "firefox"
 
